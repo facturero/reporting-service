@@ -1,0 +1,341 @@
+openapi: 3.0.3
+info:
+  title: reporting-service API
+  version: 1.0.0
+  description: >-
+    Anexos del SRI (ATS, formulario 103 y formulario 104) generados a partir de los eventos del ERP.
+    Cada generación es una VERSIÓN inmutable; regenerar sin cambios devuelve la última. Los importes van en centavos enteros.
+    Las cabeceras X-Organization-Id, X-User-Id y X-Permissions las inyecta el gateway.
+servers:
+  - url: http://localhost:3019
+    description: Desarrollo local
+  - url: https://api.noahsolution.com
+    description: Producción (vía gateway; las rutas llevan el prefijo /reporting)
+
+paths:
+  /health:
+    get:
+      summary: Salud del servicio
+      responses:
+        '200':
+          description: Servicio operativo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: reporting-service }
+
+  /reporting/annexes/runs:
+    get:
+      summary: Versiones generadas (sin el contenido del anexo)
+      description: 'Permiso: `tax_annex:read`.'
+      parameters:
+        - { name: annex, in: query, schema: { $ref: '#/components/schemas/Annex' } }
+        - { name: period, in: query, schema: { $ref: '#/components/schemas/Period' } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Página de versiones, las más nuevas primero
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/RunSummary' } }
+                  total: { type: integer }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /reporting/annexes/{annex}/{period}/generate:
+    post:
+      summary: Generar el anexo del periodo
+      description: >-
+        Calcula el anexo y lo guarda como una versión nueva. Si el contenido es idéntico al de la última versión NO crea otra y devuelve
+        esa (200). Dos generaciones simultáneas terminan en una sola versión. Permiso: `tax_annex:generate`.
+      parameters:
+        - { name: annex, in: path, required: true, schema: { $ref: '#/components/schemas/Annex' } }
+        - { name: period, in: path, required: true, schema: { $ref: '#/components/schemas/Period' } }
+      responses:
+        '201':
+          description: Se creó una versión nueva
+          content: { application/json: { schema: { $ref: '#/components/schemas/GenerateResult' } } }
+        '200':
+          description: El contenido no cambió; se devuelve la última versión
+          content: { application/json: { schema: { $ref: '#/components/schemas/GenerateResult' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /reporting/annexes/runs/{id}:
+    get:
+      summary: Detalle de una versión
+      description: Con su contenido, sus hallazgos y qué cifras cambiaron respecto a la versión anterior. Permiso `tax_annex:read`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: La versión
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  run: { $ref: '#/components/schemas/RunFull' }
+                  findings: { type: array, items: { $ref: '#/components/schemas/Finding' } }
+                  previous:
+                    nullable: true
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+                      version: { type: integer }
+                      generatedAt: { type: string, format: date-time }
+                  changes:
+                    type: array
+                    description: Cifras del resumen que cambiaron respecto a la versión anterior
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        previous: { type: number }
+                        current: { type: number }
+                        delta: { type: number }
+                  findingCounts:
+                    type: object
+                    properties:
+                      errors: { type: integer }
+                      warnings: { type: integer }
+                      previousErrors: { type: integer, nullable: true }
+                      previousWarnings: { type: integer, nullable: true }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /reporting/annexes/runs/{id}/export:
+    get:
+      summary: Descargar una versión
+      description: >-
+        CSV con BOM. El XML del ATS responde 501 `ATS_SCHEMA_PENDING` mientras el esquema oficial (XSD) del SRI no esté en el servicio.
+        Cada descarga queda en la bitácora. Permiso: `tax_annex:export`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: format, in: query, schema: { type: string, enum: [csv, xml], default: csv } }
+      responses:
+        '200':
+          description: Archivo CSV
+          content: { text/csv: { schema: { type: string } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '501': { $ref: '#/components/responses/Error' }
+
+  /reporting/annexes/{annex}/{period}/reconciliation:
+    get:
+      summary: Conciliar la última versión con el libro mayor
+      description: >-
+        Compara las cifras del anexo con el movimiento del periodo de las cuentas por rol (`vat_payable`, `vat_credit`,
+        `vat_withholding_payable`, `income_tax_withholding_payable`). Una diferencia no se oculta: se muestra. 409 si todavía no hay versión,
+        502 si contabilidad no responde. Permiso: `tax_annex:read`.
+      parameters:
+        - { name: annex, in: path, required: true, schema: { $ref: '#/components/schemas/Annex' } }
+        - { name: period, in: path, required: true, schema: { $ref: '#/components/schemas/Period' } }
+      responses:
+        '200':
+          description: Conciliación
+          content: { application/json: { schema: { $ref: '#/components/schemas/Reconciliation' } } }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+        '502': { $ref: '#/components/responses/Error' }
+
+  /reporting/annexes/{annex}/{period}/manual-inputs:
+    get:
+      summary: Casilleros manuales del anexo y los valores guardados
+      description: 'Permiso: `tax_annex:read`. `fields` lista los casilleros que admite el anexo (vacío si no tiene).'
+      parameters:
+        - { name: annex, in: path, required: true, schema: { $ref: '#/components/schemas/Annex' } }
+        - { name: period, in: path, required: true, schema: { $ref: '#/components/schemas/Period' } }
+      responses:
+        '200':
+          description: Casilleros
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fields: { type: array, items: { type: string }, example: [factor_proporcionalidad_bps, credito_anterior, iva_retenido_sufrido, ajustes] }
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        fieldCode: { type: string }
+                        amountCents: { type: integer }
+                        setBy: { type: string, format: uuid }
+                        setAt: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /reporting/annexes/{annex}/{period}/manual-inputs/{fieldCode}:
+    put:
+      summary: Guardar un casillero manual
+      description: >-
+        Crea o reemplaza el valor. NO genera una versión: hay que generar de nuevo para que entre al anexo (`needsRegeneration`).
+        El cambio queda en la bitácora con el valor anterior. Permiso: `tax_annex:generate`.
+      parameters:
+        - { name: annex, in: path, required: true, schema: { $ref: '#/components/schemas/Annex' } }
+        - { name: period, in: path, required: true, schema: { $ref: '#/components/schemas/Period' } }
+        - { name: fieldCode, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amountCents]
+              properties:
+                amountCents: { type: integer, description: 'Centavos; el factor de proporcionalidad va en puntos básicos (10000 = 100 %)' }
+      responses:
+        '200':
+          description: Guardado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fieldCode: { type: string }
+                  amountCents: { type: integer }
+                  setBy: { type: string, format: uuid }
+                  setAt: { type: string, format: date-time }
+                  needsRegeneration: { type: boolean, example: true }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /reporting/documents:
+    get:
+      summary: Comprobantes que alimentan los anexos
+      description: Ventas, compras y retenciones tal como las conoce este servicio. Permiso `tax_annex:read`.
+      parameters:
+        - { name: id, in: query, schema: { type: string, format: uuid }, description: Un solo comprobante (para llegar desde un hallazgo) }
+        - { name: sourceService, in: query, schema: { type: string, enum: [billing, purchasing, fiscal] } }
+        - { name: direction, in: query, schema: { type: string, enum: [sale, purchase, withholding_issued] } }
+        - { name: status, in: query, schema: { type: string, enum: [active, voided] } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: q, in: query, schema: { type: string, maxLength: 100 } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Página de comprobantes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        sourceService: { type: string }
+                        direction: { type: string }
+                        documentTypeCode: { type: string }
+                        number: { type: string, example: 001-001-000000001 }
+                        issueDate: { type: string, format: date }
+                        partyIdentification: { type: string, nullable: true }
+                        partyName: { type: string, nullable: true }
+                        totalCents: { type: integer }
+                        status: { type: string, enum: [active, voided] }
+                  total: { type: integer }
+                  page: { type: integer }
+                  pageSize: { type: integer }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+components:
+  responses:
+    Error:
+      description: 'Error con `code` y `message`. Códigos: ORG_CONTEXT_REQUIRED, USER_CONTEXT_REQUIRED (401), FORBIDDEN (403), NOT_FOUND (404), ANNEX_NOT_GENERATED, CONCURRENT_UPDATE (409), VALIDATION_ERROR (422), CATALOG_UNAVAILABLE (502), ATS_SCHEMA_PENDING (501).'
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: { type: string }
+              message: { type: string }
+              details:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    field: { type: string }
+                    message: { type: string }
+  schemas:
+    Annex: { type: string, enum: [ats, f103, f104] }
+    Period: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$', example: 2026-10 }
+    Finding:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        severity: { type: string, enum: [error, warning] }
+        code: { type: string, example: INVALID_PARTY_ID }
+        message: { type: string }
+        documentId: { type: string, format: uuid, nullable: true }
+    RunSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        annex: { $ref: '#/components/schemas/Annex' }
+        period: { $ref: '#/components/schemas/Period' }
+        version: { type: integer }
+        contentHash: { type: string, description: SHA-256 del contenido canónico }
+        generatedBy: { type: string, format: uuid }
+        generatedAt: { type: string, format: date-time }
+        summary: { type: object, description: Cifras principales; varían por anexo }
+    RunFull:
+      allOf:
+        - $ref: '#/components/schemas/RunSummary'
+        - type: object
+          properties:
+            content: { type: object, description: 'Contenido del anexo (estructura propia, en centavos). NO es el XML del SRI.' }
+    GenerateResult:
+      type: object
+      properties:
+        created: { type: boolean }
+        run: { $ref: '#/components/schemas/RunFull' }
+        findings: { type: array, items: { $ref: '#/components/schemas/Finding' } }
+    Reconciliation:
+      type: object
+      properties:
+        annex: { $ref: '#/components/schemas/Annex' }
+        period: { $ref: '#/components/schemas/Period' }
+        runId: { type: string, format: uuid }
+        version: { type: integer }
+        available: { type: boolean, description: 'false si la organización no tiene contabilidad configurada' }
+        status: { type: string, enum: [ok, mismatch, unavailable] }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              code: { type: string }
+              label: { type: string }
+              role: { type: string }
+              annexCents: { type: integer }
+              accountingCents: { type: integer }
+              differenceCents: { type: integer }

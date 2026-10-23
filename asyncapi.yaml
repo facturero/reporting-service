@@ -1,0 +1,290 @@
+asyncapi: 2.6.0
+info:
+  title: reporting-service — eventos
+  version: 1.0.0
+  description: >
+    reporting-service PUBLICA estos eventos en el exchange `crm.events` (patrón Outbox, @facturero/outbox-relay)
+    y CONSUME eventos de billing, purchasing y fiscal-ecuador.
+    Todo payload lleva `organizationId` y, añadidos por el relay, actor, IP y request-id.
+    Los importes van en centavos (BIGINT/entero).
+channels:
+  reporting.tax_annex.generated:
+    publish:
+      summary: Un anexo tributario se generó (versión nueva)
+      description: >-
+        Solo se publica cuando el contenido cambió respecto a la última versión: regenerar sin cambios no crea versión ni evento.
+        No lleva el contenido del anexo (son datos tributarios): solo qué, de cuándo, su versión y cuántos hallazgos tiene.
+      message:
+        payload:
+          type: object
+          required: [organizationId, runId, annex, period, version, contentHash, generatedBy, generatedAt, errors, warnings]
+          properties:
+            organizationId: { type: string, format: uuid }
+            runId: { type: string, format: uuid }
+            annex: { type: string, enum: [ats, f103, f104] }
+            period: { type: string, pattern: '^\d{4}-\d{2}$' }
+            version: { type: integer }
+            contentHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+            generatedBy: { type: string, format: uuid }
+            generatedAt: { type: string, format: date-time }
+            errors: { type: integer, description: Hallazgos de severidad error de esta versión }
+            warnings: { type: integer, description: Hallazgos de severidad advertencia de esta versión }
+
+  reporting.tax_annex.exported:
+    publish:
+      summary: Un anexo se descargó
+      description: Constancia de quién descargó qué versión. Hoy solo el CSV; el XML del ATS responde 501 hasta tener el esquema oficial.
+      message:
+        payload:
+          type: object
+          required: [organizationId, runId, annex, period, version, format, exportedBy]
+          properties:
+            organizationId: { type: string, format: uuid }
+            runId: { type: string, format: uuid }
+            annex: { type: string, enum: [ats, f103, f104] }
+            period: { type: string, pattern: '^\d{4}-\d{2}$' }
+            version: { type: integer }
+            format: { type: string, enum: [csv, xml] }
+            exportedBy: { type: string, format: uuid }
+
+  reporting.tax_annex.manual_input_set:
+    publish:
+      summary: El contador cambió un casillero manual de un anexo
+      description: Modifica lo que se declara, por eso queda en la bitácora con el valor anterior (null si era la primera vez).
+      message:
+        payload:
+          type: object
+          required: [organizationId, annex, period, fieldCode, amountCents, previousCents, setBy]
+          properties:
+            organizationId: { type: string, format: uuid }
+            annex: { type: string, enum: [ats, f103, f104] }
+            period: { type: string, pattern: '^\d{4}-\d{2}$' }
+            fieldCode: { type: string, example: credito_anterior }
+            amountCents: { type: integer }
+            previousCents: { type: integer, nullable: true }
+            setBy: { type: string, format: uuid }
+
+  billing.invoice.issued:
+    subscribe:
+      summary: CONSUMIDO — factura emitida (incluye notas de crédito 04 y débito 05)
+      message:
+        payload:
+          type: object
+          properties:
+            invoiceId: { type: string, format: uuid }
+            customerId: { type: string, format: uuid }
+            number: { type: string }
+            sequentialNumber: { type: string }
+            issueDate: { type: string, format: date-time, nullable: true }
+            documentTypeCode: { type: string, description: '01 factura, 04 nota de crédito, 05 nota de débito…' }
+            relatedInvoiceId: { type: string, format: uuid, nullable: true }
+            relatedIssueDate: { type: string, format: date-time, nullable: true }
+            creditNoteReason: { type: string, nullable: true }
+            posSaleId: { type: string, format: uuid, nullable: true }
+            paymentMethodCode: { type: string, nullable: true }
+            userId: { type: string, format: uuid, nullable: true }
+            organizationId: { type: string, format: uuid }
+            countryCode: { type: string }
+            establishmentId: { type: string, format: uuid }
+            emissionPointId: { type: string, format: uuid }
+            customerSnapshot: { type: object }
+            issuerSnapshot: { type: object }
+            subtotalCents: { type: integer }
+            taxTotalCents: { type: integer }
+            totalCents: { type: integer }
+            currencyCode: { type: string }
+            lines:
+              type: array
+              items:
+                type: object
+                properties:
+                  productId: { type: string, format: uuid, nullable: true }
+                  productCode: { type: string, nullable: true }
+                  description: { type: string }
+                  quantity: { type: number }
+                  unitPriceCents: { type: integer }
+                  discountCents: { type: integer }
+                  subtotalCents: { type: integer }
+                  taxes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        taxRateId: { type: string }
+                        kind: { type: string }
+                        rateSnapshot: { type: string }
+                        baseCents: { type: integer }
+                        amountCents: { type: integer }
+
+  billing.invoice.voided:
+    subscribe:
+      summary: CONSUMIDO — factura anulada
+      message:
+        payload:
+          type: object
+          properties:
+            invoiceId: { type: string, format: uuid }
+            number: { type: string }
+            organizationId: { type: string, format: uuid }
+            issueDate: { type: string, format: date-time, nullable: true }
+            reason: { type: string }
+            voidedAt: { type: string, format: date-time }
+            userId: { type: string, format: uuid, nullable: true }
+
+  purchasing.bill.posted:
+    subscribe:
+      summary: CONSUMIDO — factura de compra contabilizada
+      message:
+        payload:
+          type: object
+          properties:
+            billId: { type: string, format: uuid }
+            internalNumber: { type: string, nullable: true }
+            supplierId: { type: string, format: uuid }
+            supplier:
+              type: object
+              properties:
+                identification: { type: string }
+                legalName: { type: string }
+                identificationType: { type: string, nullable: true }
+            docType: { type: string, nullable: true }
+            supplierDocument: { type: string, nullable: true }
+            issueDate: { type: string, format: date, nullable: true }
+            dueDate: { type: string, format: date, nullable: true }
+            currencyCode: { type: string, nullable: true }
+            subtotalCents: { type: integer }
+            taxCents: { type: integer }
+            totalCents: { type: integer }
+            authorizationNumber: { type: string, nullable: true }
+            paymentMethodCode: { type: string, nullable: true }
+            supportCode: { type: string, nullable: true }
+            taxBreakdown:
+              type: array
+              items:
+                type: object
+                properties:
+                  taxCode: { type: string }
+                  ratePercent: { type: number }
+                  baseCents: { type: integer }
+                  amountCents: { type: integer }
+            establishmentId: { type: string, format: uuid, nullable: true }
+            orderId: { type: string, format: uuid, nullable: true }
+            matchStatus: { type: string, nullable: true }
+            lines:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind: { type: string, enum: [stock, expense] }
+                  productId: { type: string, format: uuid, nullable: true }
+                  expenseAccountHint: { type: string, nullable: true }
+                  subtotalCents: { type: integer }
+                  vatCents: { type: integer }
+                  iceCents: { type: integer }
+                  irbpnrCents: { type: integer }
+                  priceVarianceCents: { type: integer }
+
+  purchasing.bill.voided:
+    subscribe:
+      summary: CONSUMIDO — factura de compra anulada
+      message:
+        payload:
+          type: object
+          properties:
+            billId: { type: string, format: uuid }
+            internalNumber: { type: string, nullable: true }
+            supplierId: { type: string, format: uuid }
+            supplier:
+              type: object
+              properties:
+                identification: { type: string }
+                legalName: { type: string }
+                identificationType: { type: string, nullable: true }
+            docType: { type: string, nullable: true }
+            supplierDocument: { type: string, nullable: true }
+            issueDate: { type: string, format: date, nullable: true }
+            dueDate: { type: string, format: date, nullable: true }
+            currencyCode: { type: string, nullable: true }
+            subtotalCents: { type: integer }
+            taxCents: { type: integer }
+            totalCents: { type: integer }
+            voidReason: { type: string }
+            authorizationNumber: { type: string, nullable: true }
+            paymentMethodCode: { type: string, nullable: true }
+            supportCode: { type: string, nullable: true }
+            establishmentId: { type: string, format: uuid, nullable: true }
+            orderId: { type: string, format: uuid, nullable: true }
+            matchStatus: { type: string, nullable: true }
+            lines:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind: { type: string, enum: [stock, expense] }
+                  productId: { type: string, format: uuid, nullable: true }
+                  expenseAccountHint: { type: string, nullable: true }
+                  subtotalCents: { type: integer }
+                  vatCents: { type: integer }
+                  iceCents: { type: integer }
+                  irbpnrCents: { type: integer }
+                  priceVarianceCents: { type: integer }
+
+  fiscal.ec.withholding.issued:
+    subscribe:
+      summary: CONSUMIDO — retención autorizada por el SRI
+      message:
+        payload:
+          type: object
+          properties:
+            withholdingId: { type: string, format: uuid }
+            fiscalInvoiceId: { type: string, format: uuid }
+            organizationId: { type: string, format: uuid }
+            number: { type: string, nullable: true }
+            issueDate: { type: string, format: date-time, nullable: true }
+            establishmentId: { type: string, format: uuid }
+            authorizationNumber: { type: string, nullable: true }
+            userId: { type: string, format: uuid, nullable: true }
+            currencyCode: { type: string }
+            supplier:
+              type: object
+              properties:
+                identification: { type: string }
+                businessName: { type: string }
+                identificationType: { type: string, nullable: true }
+            support:
+              type: object
+              nullable: true
+              properties:
+                documentCode: { type: string, nullable: true }
+                number: { type: string, nullable: true }
+                issueDate: { type: string, format: date, nullable: true }
+                supportCode: { type: string, nullable: true }
+                authorizationNumber: { type: string, nullable: true }
+                totalWithoutTaxesCents: { type: integer, nullable: true }
+                totalCents: { type: integer, nullable: true }
+                paymentMethodCode: { type: string, nullable: true }
+                taxes:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      code: { type: string }
+                      percentageCode: { type: string }
+                      rate: { type: number }
+                      baseCents: { type: integer }
+                      amountCents: { type: integer }
+            fiscalPeriod: { type: string, pattern: '^\\d{2}/\\d{4}$', nullable: true }
+            lines:
+              type: array
+              items:
+                type: object
+                properties:
+                  tax: { type: string, enum: [income, vat, isd] }
+                  retentionCode: { type: string }
+                  baseCents: { type: integer }
+                  ratePercent: { type: number }
+                  amountCents: { type: integer }
+            incomeTaxWithheldCents: { type: integer }
+            vatWithheldCents: { type: integer }
+            isdWithheldCents: { type: integer }
+            totalWithheldCents: { type: integer }
