@@ -12,3 +12,4 @@ npm-debug.log*
 .vscode/
 config/*.env
 !config/*.enc
+config/*.dec
