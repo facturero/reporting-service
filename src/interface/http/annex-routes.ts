@@ -62,7 +62,7 @@ export function annexRoutes(deps: AppDependencies): Hono<Vars> {
     });
 
   r.get('/reporting/annexes/runs/:id', orgCtx, requirePermission('tax_annex:read'),
-    validate('param', z.object({ id: z.string().uuid() })),
+    validate('param', z.object({ id: z.string().guid() })),
     async (c) => {
       const detail = await uc.getRun.execute(org(c), c.req.valid('param').id);
       return c.json({
@@ -75,7 +75,7 @@ export function annexRoutes(deps: AppDependencies): Hono<Vars> {
     });
 
   r.get('/reporting/annexes/runs/:id/export', orgCtx, requireUser(), requirePermission('tax_annex:export'),
-    validate('param', z.object({ id: z.string().uuid() })),
+    validate('param', z.object({ id: z.string().guid() })),
     validate('query', z.object({ format: z.enum(['csv', 'xml']).default('csv') })),
     async (c) => {
       const file = await uc.exportRun.execute({ organizationId: org(c), runId: c.req.valid('param').id, format: c.req.valid('query').format, exportedBy: user(c) });
@@ -113,7 +113,7 @@ export function annexRoutes(deps: AppDependencies): Hono<Vars> {
 
   r.get('/reporting/documents', orgCtx, requirePermission('tax_annex:read'),
     validate('query', z.object({
-      id: z.string().uuid().optional(),
+      id: z.string().guid().optional(),
       sourceService: z.enum(['billing', 'purchasing', 'fiscal']).optional(),
       direction: z.enum(['sale', 'purchase', 'withholding_issued']).optional(),
       status: z.enum(['active', 'voided']).optional(),
